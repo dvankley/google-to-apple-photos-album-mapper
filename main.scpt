@@ -22,18 +22,21 @@ processSingleAlbum('/Users/dvankley/Downloads/Takeout1/Google Photos/Test Album'
 function processSingleAlbum(albumPath, dryRun) {
 	console.log(`Mapping Google to Apple photos from takeout directory ${JSON.stringify(albumPath)}`);
 	
-	const applePhotosByTimestamp = indexApplePhotosByTimestamp();
+	// const applePhotosByTimestamp = indexApplePhotosByTimestamp();
+	// Save time whilst testing
+	const applePhotosByTimestamp = {};
 
-	const albumFiles = appSys.folders.byName(albumPath).diskItems;
-	for (const albumFile of albumFiles) {
-		if (!albumFile.name().endsWith('.json')) {
+	const albumFileNames = appSys.folders.byName(albumPath).diskItems.name();
+	for (const albumFileName of albumFileNames) {
+		if (!albumFileName.endsWith('.json')) {
 			// We only care about the metadata files in this loop; we'll grab relevant image files if we need
 			//	to later.
 			continue;
 		}
-		const rawImageMetadata = app.read(Path(albumFile.toString()));
+		console.log(`Reading metadata for ${albumFileName}`);
+		const rawImageMetadata = app.read(Path(albumFileName));
 		const imageMetadata = JSON.parse(rawImageMetadata);
-		console.log(`Image ${albumFile.name()} metadata: ${rawImageMetadata}`);
+		console.log(`Image ${albumFileName} metadata: ${rawImageMetadata}`);
 	}
 
 
