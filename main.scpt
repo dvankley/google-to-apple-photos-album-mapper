@@ -40,9 +40,9 @@ processSingleAlbum('/Users/dvankley/Downloads/Takeout1/Google Photos/Test Album'
 function processSingleAlbum(albumPath, dryRun) {
 	console.log(`Mapping Google to Apple photos from takeout directory ${JSON.stringify(albumPath)}`);
 	
-	const applePhotosByTimestamp = indexApplePhotos();
+	const indexedApplePhotos = indexApplePhotos();
 	// Save time whilst testing
-	// const applePhotosByTimestamp = {};
+	// const indexedApplePhotos = {};
 
 	const albumFileNames = appSys.folders.byName(albumPath).diskItems.name();
 	for (const albumFileName of albumFileNames) {
@@ -55,6 +55,16 @@ function processSingleAlbum(albumPath, dryRun) {
 		const rawImageMetadata = app.read(Path(`${albumPath}/${albumFileName}`));
 		const imageMetadata = JSON.parse(rawImageMetadata);
 		console.log(`Image ${albumFileName} metadata: ${rawImageMetadata}`);
+
+		const timestamp = imageMetadata.photoTakenTime.timestamp;
+		const filename = imageMetadata.title;
+		const key = getPhotoIndexKey(filename, timestamp);
+
+		if (indexedApplePhotos.hasOwnProperty(key)) {
+			console.log(`Found matching Apple photo for Google photo ${filename}`);
+		} else {
+			console.log(`Failed to find matching Apple photo for Google photo ${filename}`);
+		}
 	}
 
 
@@ -81,13 +91,22 @@ function indexApplePhotos() {
 	for (const item of p.mediaItems()) {
 		const timestamp = item.date().getTime();
 		const filename = item.filename();
-		const key = `${filename}|${timestamp}`;
+		const key = getPhotoIndexKey(filename, timestamp);
 		if (out.hasOwnProperty(key)) {
 			console.log(`Conflict: item ${item.filename()} has same key ${key} as ${out[key].filename()}`);
 			continue;
 		}
 		out[key] = item;
 	}
+	return out;
+}
+
+/**
+ * @param {string} filename 
+ * @param {number} timestamp 
+ */
+function getPhotoIndexKey(filename, timestamp) {
+	return `${filename}|${timestamp}`;
 }
 
 /**
