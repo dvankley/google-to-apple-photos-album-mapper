@@ -16,33 +16,33 @@ const COPY_MISSING_PHOTOS = false;
 /**
  * If true, Apple photos will be added to the album that the corresponding (same file name and timestamp)
  * 	Google photo is in.
- * False basically functions as a dry run, where info will be logged but album membership won't be changed.
+ * False will still read and compare data, but album membership won't be changed.
  */
-const APPLY_ALBUM_MEMBERSHIP = false;
-
+const APPLY_ALBUM_MEMBERSHIP = true;
 
 /**
- * Uncomment if you're running from the command line
- * This function is called when the script is invoked from the command line
+ * Entry point
  */
-// function run(...args) {
-// 	main(args[0]);
-// }
-
-// Uncomment this if you're running the script in Script Editor because it doesn't 
-//	allow parameters.
-processSingleAlbum('/Users/dvankley/Downloads/Takeout1/Google Photos/Test Album', true);
+function run(...args) {
+	runForSingleAlbum('/Users/dvankley/Downloads/Takeout/Takeout1/Google Photos/Test Album');
+}
 
 /**
  * @param {string} albumPath 
  * @param {boolean} dryRun 
  */
-function processSingleAlbum(albumPath, dryRun) {
-	console.log(`Mapping Google to Apple photos from takeout directory ${JSON.stringify(albumPath)}`);
-	
-	const indexedApplePhotos = indexApplePhotos();
+function runForSingleAlbum(albumPath, dryRun) {
+	const albumName = albumPath.substring(albumPath.lastIndexOf('/') + 1);
+	console.log(`Mapping Google to Apple photos for album ${albumName} from directory ${albumPath}`);
+
+	const albumsByName = indexByCallback(p.albums(), album => album.name());
+
 	// Save time whilst testing
-	// const indexedApplePhotos = {};
+	const indexedApplePhotosAll = indexApplePhotosForCollection(p.search({ for: 'IMG_1681.JPG' }));
+	// const indexedApplePhotosAll = indexApplePhotos(p.mediaItems());
+
+	// const indexedApplePhotosByAlbum = {};
+	const indexedApplePhotosByAlbum = indexApplePhotosForAllAlbums(p.albums());
 
 	const albumFileNames = appSys.folders.byName(albumPath).diskItems.name();
 	for (const albumFileName of albumFileNames) {
@@ -54,22 +54,39 @@ function processSingleAlbum(albumPath, dryRun) {
 		console.log(`Reading metadata for ${albumFileName}`);
 		const rawImageMetadata = app.read(Path(`${albumPath}/${albumFileName}`));
 		const imageMetadata = JSON.parse(rawImageMetadata);
-		console.log(`Image ${albumFileName} metadata: ${rawImageMetadata}`);
+		// console.log(`Image ${albumFileName} metadata: ${rawImageMetadata}`);
 
 		const timestamp = imageMetadata.photoTakenTime.timestamp;
 		const filename = imageMetadata.title;
 		const key = getPhotoIndexKey(filename, timestamp);
 
-		if (indexedApplePhotos.hasOwnProperty(key)) {
-			console.log(`Found matching Apple photo for Google photo ${filename}`);
+		const matchedItem = indexedApplePhotosAll[key];
+
+		if (matchedItem) {
+			console.log(`Found matching Apple photo for Google photo ${key}`);
+
+			if (APPLY_ALBUM_MEMBERSHIP) {
+				console.log(`Adding photo ${filename} to album ${albumName}`);
+
+				let album = albumsByName[albumName];
+
+				if (!album) {
+					console.log(`Album ${albumName} does not exist, creating`);
+					album = p.make({
+						new: 'album',
+						named: albumName,
+					});
+				}
+
+				p.add([matchedItem], { to: album });
+			}
+
+			if (COPY_MISSING_PHOTOS) {
+				//TODO
+			}
 		} else {
-			console.log(`Failed to find matching Apple photo for Google photo ${filename}`);
+			console.log(`Failed to find matching Apple photo for Google photo ${key}`);
 		}
-	}
-
-
-	for (const album of Application("Photos").albums()) {
-		console.log(album.name());
 	}
 }
 
@@ -77,25 +94,41 @@ function processSingleAlbum(albumPath, dryRun) {
  * @param {string} topLevelPath 
  * @param {boolean} dryRun 
  */
-function processAllAlbums(topLevelPath, dryRun) {
+function runForAllAlbums(topLevelPath, dryRun) {
 
+	// const takeoutDirectoryNames = appSys.folders.byName();
 }
 
 /**
- * 
+ * Indexes photos by album and below that by getPhotoIndexKey()
+ * @param {Album[]}
+ * @return {Object.<string, Object.<string, MediaItem>>}
  */
-function indexApplePhotos() {
-	console.log(`Indexing apple photos`);
-
+function indexApplePhotosForAllAlbums(collection) {
 	let out = {};
-	for (const item of p.mediaItems()) {
-		const timestamp = item.date().getTime();
+	for (const album of collection) {
+		console.log(`Indexing Apple Photos for album ${album.name()}`);
+		out[album.name()] = indexApplePhotosForCollection(album.mediaItems());
+	}
+	return out;
+}
+
+/**
+ * Indexes all photos in the current Apple Photos library by getPhotoIndexKey()
+ * @param {MediaItem[]}
+ * @return {Object.<string, MediaItem>}
+ */
+function indexApplePhotosForCollection(collection) {
+	let out = {};
+	for (const item of collection) {
+		const timestamp = item.date().getTime() / 1000;
 		const filename = item.filename();
 		const key = getPhotoIndexKey(filename, timestamp);
 		if (out.hasOwnProperty(key)) {
 			console.log(`Conflict: item ${item.filename()} has same key ${key} as ${out[key].filename()}`);
 			continue;
 		}
+		console.log(`Indexing Apple Photos item ${key}: ${JSON.stringify(item)}`);
 		out[key] = item;
 	}
 	return out;
@@ -123,4 +156,12 @@ function importGooglePhoto() {
 
 function moveApplePhotoToAlbum() {
 
+}
+
+function indexByCallback(array, callback) {
+	let out = {};
+	for (item of array) {
+		out[callback(item)] = item;
+	}
+	return out;
 }
