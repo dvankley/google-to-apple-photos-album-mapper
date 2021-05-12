@@ -5,42 +5,57 @@ app.includeStandardAdditions = true
 var appSys = Application('System Events');
 
 // ARGUMENTS/GLOBAL PARAMETERS
+// Defaults are set here, but run arguments may override them
 
 /**
  * If true, Apple photos will be added to the album that the corresponding (same file name and timestamp)
  * 	Google photo is in.
  * False will still read and compare data, but album membership won't be changed.
  */
-const APPLY_ALBUM_MEMBERSHIP = true;
+let APPLY_ALBUM_MEMBERSHIP = false;
 
 /**
  * If true, photos in Google albums that are not present in the Apple photo library will be
  * 	imported and added to the corresponding album.
  * If false, photos will not be imported, only reorganized in the Apple photo library if they're found.
  */
-const COPY_MISSING_PHOTOS = false;
+let COPY_MISSING_PHOTOS = false;
 
 /**
  * Entry point
  */
 function run(...args) {
-	runForSingleAlbum('/Users/dvankley/Downloads/Takeout/Takeout1/Google Photos/Test Album');
+	// const path = args[0] ?? '/Users/dvankley/Downloads/Takeout/Takeout1/Google Photos/Test Album';
+	const path = '/Users/dvankley/Downloads/Takeout';
+	APPLY_ALBUM_MEMBERSHIP = Boolean(args[1] ?? APPLY_ALBUM_MEMBERSHIP);
+	COPY_MISSING_PHOTOS = Boolean(args[2] ?? COPY_MISSING_PHOTOS);
+	console.log(`Running for path ${path} with APPLY_ALBUM_MEMBERSHIP ${APPLY_ALBUM_MEMBERSHIP} and ` +
+		`COPY_MISSING_PHOTOS ${COPY_MISSING_PHOTOS}`);
+
+	const directoryNames = appSys.folders.byName(path).folders.name();
+	if (directoryNames.length > 0) {
+		// If the path contains sub-directories, then try to process all albums
+		console.log(`Subdirectories found, attempting to process multiple albums`);
+		runForAllAlbums(path);
+	} else {
+		// Otherwise treat this as a single album
+		console.log(`No subdirectories found, attempting to process this as a single album`);
+		runForSingleAlbum(path);
+	}
 }
 
 /**
  * @param {string} topLevelPath 
- * @param {boolean} dryRun 
  */
-function runForAllAlbums(topLevelPath, dryRun) {
+function runForAllAlbums(topLevelPath) {
 
 	// const takeoutDirectoryNames = appSys.folders.byName();
 }
 
 /**
  * @param {string} albumPath 
- * @param {boolean} dryRun 
  */
-function runForSingleAlbum(albumPath, dryRun) {
+function runForSingleAlbum(albumPath) {
 	const albumName = albumPath.substring(albumPath.lastIndexOf('/') + 1);
 	console.log(`Mapping Google to Apple photos for album ${albumName} from directory ${albumPath}`);
 
