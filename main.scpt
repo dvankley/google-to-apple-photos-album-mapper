@@ -98,8 +98,8 @@ function runForSingleAlbum(albumPath, dryRun) {
 		if (COPY_MISSING_PHOTOS) {
 			console.log(`Importing Google photo ${filename} into Apple album ${albumName}.`);
 			const album = getOrCreateTopLevelAppleAlbum(albumsByName, albumName);
-
-			importGooglePhoto(`${albumPath}/${filename}`, album);
+			const photo = importGooglePhoto(`${albumPath}/${filename}`, album);
+			moveApplePhotoToAlbum(photo, album);
 		} else {
 			console.log(`Would have imported Google photo ${filename} into Apple album ${albumName}.`);
 		}
@@ -159,6 +159,7 @@ function getOrCreateTopLevelAppleAlbum(albumsByName, name) {
 
 	if (!album) {
 		album = createTopLevelAppleAlbum(name);
+		console.log(`Created apple album "${album.name()} with id ${album.id()}"`)
 		albumsByName[name] = album;
 	}
 	return album;
@@ -188,10 +189,11 @@ function moveApplePhotoToAlbum(photo, album) {
 /**
  * @param {string} path 
  * @param {Album} album 
- * @returns MediaItem[]
+ * @returns MediaItem
  */
 function importGooglePhoto(path, album) {
-	return p.import([path], {to: album});
+	// to: "add to album" param doesn't work for some reason, so add the photo to an album separately
+	return p.import([Path(path)])[0];
 }
 
 function indexByCallback(array, callback) {
