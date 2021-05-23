@@ -1,3 +1,5 @@
+# NOTE: this project is still a work in progress, so don't expect anything of it yet
+
 # Google to Apple Photos Mapper
 A tool to help with migrating photos from Google Photos to Apple Photos.
 
