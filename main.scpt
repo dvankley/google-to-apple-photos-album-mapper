@@ -1,8 +1,9 @@
 // IMPORTS
 const p = Application('Photos');
+const finder = Application('Finder');
 const app = Application.currentApplication()
 app.includeStandardAdditions = true
-var appSys = Application('System Events');
+const appSys = Application('System Events');
 ObjC.import('Cocoa');
 
 // ARGUMENTS/GLOBAL PARAMETERS
@@ -21,6 +22,21 @@ let APPLY_ALBUM_MEMBERSHIP = 'false';
  * If false, photos will not be imported, only reorganized in the Apple photo library if they're found.
  */
 let COPY_MISSING_PHOTOS = 'false';
+
+/**
+ * Set to true to update files that are imported with the timestamp specified in their corresponding Google Photos
+ * 	metadata file.
+ * The intended result is that the photo timestamp in Apple Photos matches the timestamp in the Google Photos metadata.
+ */
+const UPDATE_IMPORTED_FILE_TIMESTAMPS = true;
+
+/**
+ * A set of filenames that should be excluded from the import process.
+ * 
+ * Current reasons for filenames to be on this list:
+ * - The movie component of an Apple Live Photo that was found to already exist in Apple Photos.
+ */
+let importExcludedFilenameSet = {};
 
 // ENTRY POINT
 function run(...argv) {
@@ -41,7 +57,7 @@ function run(...argv) {
 	const scriptPath = scriptPathArg ?? '/Users/dvankley/dev/google-to-apple-photos-album-mapper';
 	APPLY_ALBUM_MEMBERSHIP = (membershipArg ?? APPLY_ALBUM_MEMBERSHIP) === 'true';
 	COPY_MISSING_PHOTOS = (copyArg ?? COPY_MISSING_PHOTOS) === 'true';
-	console.log(`Running for takeout path ${takeoutPath} with working direcotry ${scriptPath}, APPLY_ALBUM_MEMBERSHIP ${APPLY_ALBUM_MEMBERSHIP} and ` +
+	console.log(`Running for takeout path ${takeoutPath} with working directory ${scriptPath}, APPLY_ALBUM_MEMBERSHIP ${APPLY_ALBUM_MEMBERSHIP} and ` +
 		`COPY_MISSING_PHOTOS ${COPY_MISSING_PHOTOS}`);
 
 	const directoryNames = appSys.folders.byName(takeoutPath).folders.name();
@@ -64,6 +80,7 @@ function run(...argv) {
 			scriptPath,
 			appleAlbumsByName,
 			indexedApplePhotosByKey,
+			indexedApplePhotosByFilename,
 			indexedApplePhotosByAlbumAndKey,
 			matchedPhotoFilenames,
 		);
@@ -71,6 +88,7 @@ function run(...argv) {
 			takeoutPath,
 			scriptPath,
 			appleAlbumsByName,
+			indexedApplePhotosByKey,
 			indexedApplePhotosByFilename,
 			indexedApplePhotosByAlbumAndKey,
 			matchedPhotoFilenames,
@@ -123,6 +141,7 @@ function runForAllAlbums(topLevelPath, workingPath) {
 				workingPath,
 				appleAlbumsByName,
 				indexedApplePhotosByKey,
+				indexedApplePhotosByFilename,
 				indexedApplePhotosByAlbumAndKey,
 				matchedPhotoFilenames,
 			);
@@ -138,6 +157,7 @@ function runForAllAlbums(topLevelPath, workingPath) {
 				path,
 				workingPath,
 				appleAlbumsByName,
+				indexedApplePhotosByKey,
 				indexedApplePhotosByFilename,
 				indexedApplePhotosByAlbumAndKey,
 				matchedPhotoFilenames,
@@ -167,6 +187,9 @@ function runForAllAlbums(topLevelPath, workingPath) {
  * @param {string} workingPath
  * @param appleAlbumsByName Object.<string, Album>
  * @param indexedApplePhotosAll Object.<string, MediaItem> All Apple photos indexed by photo key from getPhotoIndexKey()
+ * 	The values are a single photo because the photo key should be unique.
+ * @param indexedApplePhotosByFilename Object.<string, MediaItem[]> All Apple photos indexed by filename.
+ * 	The values are an array because there can be multiple files with the same filename.
  * @param indexedApplePhotosByAlbum Object.<string, Object.<string, MediaItem>> Same as indexedApplePhotosAll, except
  * 	a top level of grouping by album name.
  * This function is expected to keep this up to date by adding new album and photo entries if it modifies the state
@@ -180,6 +203,7 @@ function matchForSingleAlbum(
 	workingPath,
 	appleAlbumsByName,
 	indexedApplePhotosAll,
+	indexedApplePhotosByFilename,
 	indexedApplePhotosByAlbum,
 	matchedPhotoFilenames,
 ) {
@@ -187,6 +211,12 @@ function matchForSingleAlbum(
 	console.log(`Mapping Google to Apple photos for album ${albumName} from directory ${albumPath}`);
 
 	const albumFileNames = appSys.folders.byName(albumPath).diskItems.name();
+	// Create a set of file names so we can check for their existence in O(1)
+	let albumFileNameSet = {};
+	for (const albumFileName of albumFileNames) {
+		albumFileNameSet[albumFileName] = true;
+	}
+
 	const metaMetadataFilenames = [
 		'user-generated-memory-titles.json',
 		'shared_album_comments.json',
@@ -210,6 +240,7 @@ function matchForSingleAlbum(
 			//	to later.
 			continue;
 		}
+
 		// console.log(`Reading metadata for ${albumFileName}`);
 		const rawImageMetadata = app.read(Path(`${albumPath}/${albumFileName}`));
 		const imageMetadata = JSON.parse(rawImageMetadata);
@@ -217,7 +248,18 @@ function matchForSingleAlbum(
 
 		const timestamp = imageMetadata.photoTakenTime.timestamp;
 		const filename = imageMetadata.title;
+		const filepath = `${albumPath}/${filename}`;
+		
+		if (!doesFileExist(filepath)) {
+			console.log(`Failed to find expected image file ${filepath} referenced in metadata file`);
+			continue;
+		}
+
 		const key = getPhotoIndexKey(filename, timestamp);
+
+		updatePhotoFileTimestamp(timestamp, filepath);
+
+		ignoreLivePhotos(filepath, albumFileNameSet);
 
 		const matchedItem = indexedApplePhotosAll[key];
 		// if (Object.values(matchedItems).length !== 1) {
@@ -258,10 +300,81 @@ function matchForSingleAlbum(
 }
 
 /**
+ * @param {string} path 
+ * @returns True if a file exists at {@link path}, false if not.
+ */
+function doesFileExist(path)
+{
+	let error = false;
+	try {
+		app.doShellScript(`test -f "${path}"`);
+	} catch (e) {
+		error = true;
+	}
+	return !error;
+}
+
+/**
+ * Checks if this file's creation timestamp does not match the photo timestamp in the Google Photos metadata
+ * 	and the config flag is set to update that. If so, update's the file's creation timestamp in the filesystem.
+ * 
+ * @param {number} metadataTimestamp
+ * @param {string} filepath
+ */
+function updatePhotoFileTimestamp(
+	metadataTimestamp,
+	filepath,
+) {
+	if (UPDATE_IMPORTED_FILE_TIMESTAMPS) {
+		// Get the creation date of the file
+		debugger;
+		const rawTimestamp = app.doShellScript(`stat -f "%B" "${filepath}"`);
+		const fileTimestamp = parseInt(rawTimestamp, 10);
+
+		if (fileTimestamp !== metadataTimestamp) {
+			console.log(`Timestamp mismatch for path ${filepath}; updating file creation timestamp from ` +
+				`${fileTimestamp} to ${metadataTimestamp}`);
+			app.doShellScript(`touch -t "$(date -r ${metadataTimestamp} +%Y%m%d%H%M.%S)" "${filepath}"`)
+		}
+	}
+}
+
+/**
+ * Checks if this JSON file corresponds to an image file that also has an mp4 movie (an Apple Live Photo),
+ * 	if so, then marks the movie to be ignored when importing by updating {@link importExcludedFilenameSet}.
+ * 
+ * @param {string} filename
+ * @param {Object.<string, boolean>} albumFileNameSet
+ */
+function ignoreLivePhotos(
+	filename,
+	albumFileNameSet,
+) {
+	const extensionRegex = /\.[\w\d]{3,4}$/i;
+	const filenameWithoutExtension = filename.replace(extensionRegex, '');
+	// console.log(`Raw filename ${filename}; without extension: ${filenameWithoutExtension}`);
+
+	const livePhotoFilenames = [
+		`${filenameWithoutExtension}.mp4`,
+		`${filenameWithoutExtension}.MP4`,
+	]
+	for (const livePhotoFilename of livePhotoFilenames) {
+		if (albumFileNameSet.hasOwnProperty(livePhotoFilename)) {
+			console.log(`Live photo ${filename} detected; ignoring ${livePhotoFilename} for import.`);
+			importExcludedFilenameSet[livePhotoFilename] = true;
+			break;
+		}
+	}
+}
+
+/**
  * @param {string} albumPath
  * @param {string} workingPath
  * @param appleAlbumsByName Object.<string, Album>
- * @param indexedApplePhotosByFilename Object.<string, MediaItem[]> All Apple photos indexed by filename
+ * @param indexedApplePhotosAll Object.<string, MediaItem> All Apple photos indexed by photo key from getPhotoIndexKey()
+ * 	The values are a single photo because the photo key should be unique.
+ * @param indexedApplePhotosByFilename Object.<string, MediaItem[]> All Apple photos indexed by filename.
+ * 	The values are an array because there can be multiple files with the same filename.
  * @param indexedApplePhotosByAlbum Object.<string, Object.<string, MediaItem>> Same as indexedApplePhotosAll, except
  * 	a top level of grouping by album name
  * @param matchedPhotoFilenames Object.<string, string> A set of filenames (keys and values) that exist in Google and
@@ -272,6 +385,7 @@ function importForSingleAlbum(
 	albumPath,
 	workingPath,
 	appleAlbumsByName,
+	indexedApplePhotosAll,
 	indexedApplePhotosByFilename,
 	indexedApplePhotosByAlbum,
 	matchedPhotoFilenames,
@@ -296,6 +410,10 @@ function importForSingleAlbum(
 			console.log(`Google photo ${filename} was already matched with an Apple photo; not importing.`);
 			continue;
 		}
+		if (importExcludedFilenameSet.hasOwnProperty(filename)) {
+			console.log(`Google photo ${filename} explicitly marked as import excluded; not importing.`);
+			continue;
+		}
 		importedPhotos[filename] = filename;
 		if (COPY_MISSING_PHOTOS) {
 			console.log(`Importing Google photo ${filename} into Apple album ${albumName}.`);
@@ -306,9 +424,9 @@ function importForSingleAlbum(
 				// Let's see if we can find the duplicate
 				const dupes = indexedApplePhotosByFilename[filename];
 				if (dupes) {
-					if (dupes.length === 0) {
+					if (dupes.length === 1) {
 						console.log(`Importing Google photo ${filename} failed because it's a duplicate. Applying album membership to the duplicate.`);
-						photo = dupe;
+						photo = dupes[0];
 					} else {
 						console.log(`Importing Google photo ${filename} failed because it has multiple duplicates. You should manually fix this conflict.`);
 						importFailedPhotos[filename] = filename;
@@ -320,7 +438,11 @@ function importForSingleAlbum(
 					continue;
 				}
 			}
-			moveApplePhotoToAlbum(photo, album, indexedApplePhotosByAlbum);
+			moveApplePhotoToAlbum(
+				photo,
+				album,
+				indexedApplePhotosByAlbum
+			);
 		} else {
 			// console.log(`Would have imported Google photo ${filename} into Apple album ${albumName}.`);
 		}
