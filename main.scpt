@@ -327,13 +327,12 @@ function updatePhotoFileTimestamp(
 ) {
 	if (UPDATE_IMPORTED_FILE_TIMESTAMPS) {
 		// Get the creation date of the file
-		debugger;
 		const rawTimestamp = app.doShellScript(`stat -f "%B" "${filepath}"`);
 		const fileTimestamp = parseInt(rawTimestamp, 10);
 
 		if (fileTimestamp !== metadataTimestamp) {
-			console.log(`Timestamp mismatch for path ${filepath}; updating file creation timestamp from ` +
-				`${fileTimestamp} to ${metadataTimestamp}`);
+			// console.log(`Timestamp mismatch for path ${filepath}; updating file creation timestamp from ` +
+				// `${fileTimestamp} to ${metadataTimestamp}`);
 			app.doShellScript(`touch -t "$(date -r ${metadataTimestamp} +%Y%m%d%H%M.%S)" "${filepath}"`)
 		}
 	}
@@ -380,6 +379,8 @@ function ignoreLivePhotos(
  * @param matchedPhotoFilenames Object.<string, string> A set of filenames (keys and values) that exist in Google and
  * 	were matched by key from getPhotoIndexKey() to an Apple photo in matchForSingleAlbum, and presumably added to
  * 	an album if requested.
+ * Also includes photos that were imported. This is to ensure that a given photo is only imported once, even if it's
+ * 	in multiple Google Photo albums.
  */
 function importForSingleAlbum(
 	albumPath,
@@ -418,7 +419,8 @@ function importForSingleAlbum(
 		if (COPY_MISSING_PHOTOS) {
 			console.log(`Importing Google photo ${filename} into Apple album ${albumName}.`);
 			const album = getOrCreateTopLevelAppleAlbum(appleAlbumsByName, albumName, indexedApplePhotosByAlbum);
-			let photo = importGooglePhotoIntoApplePhotos(`${albumPath}/${filename}`, album);
+			let photo = importGooglePhotoIntoApplePhotos(`${albumPath}/${filename}`);
+			matchedPhotoFilenames[filename] = filename;
 			if (!photo) {
 				// Import failed for some reason, probably Apple Photos duplicate detection
 				// Let's see if we can find the duplicate
