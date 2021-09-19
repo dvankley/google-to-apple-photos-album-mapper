@@ -115,9 +115,9 @@ function runForAllAlbums(topLevelPath, workingPath) {
 	let takeoutDirectoriesByGoogleAlbumNames = {};
 
 	// Google doesn’t do a good job breaking up albums.
-	//	You can end up with a photo’s metadata file in one chunk and the actual image file in the other, so 
+	// You can end up with a photo’s metadata file in one chunk and the actual image file in the other, so 
 	//	We need to do a first pass and get a set of all unique album names across all takeout directories first
-	//	so we can match and import bsaed on the aggregate of all metadata for a given album
+	//	so we can match and import based on the aggregate of all metadata for a given album.
 	for (const takeoutDirectoryName of takeoutDirectoryNames) {
 		const albumNames = appSys.folders.byName(`${topLevelPath}/${takeoutDirectoryName}/Google Photos`).folders.name();
 		for (const albumName of albumNames) {
@@ -128,7 +128,25 @@ function runForAllAlbums(topLevelPath, workingPath) {
 		}
 	}
 
-	// Iterate over each album and aggregate data from all takeout directories that have data for that album
+	// The metadata files only give the filename of the image, not the takeout chunk that it's in, so we also
+	//	need to index all image files by the takeout chunk they're in so we can find them.
+	// We're just going to index all files rather than try to figure out all possible image file extensions.
+	let imageFilePathsByAlbum = {};
+
+	for (const albumName of Object.keys(takeoutDirectoriesByGoogleAlbumNames)) {
+		imageFilePathsByAlbum[albumName] = {};
+		const takeoutDirectoryNames = takeoutDirectoriesByGoogleAlbumNames[albumName];
+
+		for (const takeoutDirectoryName of takeoutDirectoryNames) {
+			const albumPath = `${topLevelPath}/${takeoutDirectoryName}/Google Photos/${albumName}`;
+			const albumFileNames = appSys.folders.byName(albumPath).diskItems.name();
+			for (const albumFileName of albumFileNames) {
+				imageFilePathsByAlbum[albumName][albumFileName] = `${albumPath}/${albumFileName}`;
+			}
+		}
+	}
+
+	// Iterate again over each album and aggregate data from all takeout directories that have data for that album
 	for (const albumName of Object.keys(takeoutDirectoriesByGoogleAlbumNames)) {
 		const takeoutDirectoryNames = takeoutDirectoriesByGoogleAlbumNames[albumName];
 		console.log(`Processing ${takeoutDirectoryNames.length} takeout directories for album ${albumName}`);
@@ -144,6 +162,7 @@ function runForAllAlbums(topLevelPath, workingPath) {
 				indexedApplePhotosByFilename,
 				indexedApplePhotosByAlbumAndKey,
 				matchedPhotoFilenames,
+				imageFilePathsByAlbum[albumName],
 			);
 		}
 
@@ -197,6 +216,9 @@ function runForAllAlbums(topLevelPath, workingPath) {
  * @param matchedPhotoFilenames Object.<string, string> A set of filenames (keys and values) that exist in Google and
  * 	were matched by key from getPhotoIndexKey() to an Apple photo
  * This function is expected to populate this as it searches for photo matches.
+ * @param imageFilePaths Object.<string, Object.<string, true>> Keys are the filenames of all image files
+ * 	(or all files in general) that belong to this album. Value is the path of the given filename.
+ * This is only useful if working across multiple Takeout chunks.
  */
 function matchForSingleAlbum(
 	albumPath,
@@ -206,6 +228,7 @@ function matchForSingleAlbum(
 	indexedApplePhotosByFilename,
 	indexedApplePhotosByAlbum,
 	matchedPhotoFilenames,
+	imageFilePaths = {},
 ) {
 	const albumName = albumPath.substring(albumPath.lastIndexOf('/') + 1);
 	console.log(`Mapping Google to Apple photos for album ${albumName} from directory ${albumPath}`);
@@ -248,10 +271,14 @@ function matchForSingleAlbum(
 
 		const timestamp = imageMetadata.photoTakenTime.timestamp;
 		const filename = imageMetadata.title;
-		const filepath = `${albumPath}/${filename}`;
+		const filepath = imageFilePaths[filename];
+		if (!filepath) {
+			console.log(`Failed to find cross-chunk file path for filename ${filename} referenced in metadata file ${albumPath}/${albumFileName}`);
+			continue;
+		}
 		
 		if (!doesFileExist(filepath)) {
-			console.log(`Failed to find expected image file ${filepath} referenced in metadata file`);
+			console.log(`Failed to find expected image file ${filepath} referenced in metadata file ${albumPath}/${albumFileName}`);
 			continue;
 		}
 
