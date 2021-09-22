@@ -31,12 +31,29 @@ let COPY_MISSING_PHOTOS = 'false';
 const UPDATE_IMPORTED_FILE_TIMESTAMPS = true;
 
 /**
+ * For some reason, sometimes the image filename in a Google Photos metadata file will be longer than the actual filename.
+ * Usually this happens if the filename is over 46 characters.
+ * I have no idea why this is. Maybe a limitation in filename length when zipping or exporting image files?
+ * Enabling this flag will cause the script to see if it can find any image files in the same album that have a prefix
+ * 	matching the filename in the metadata file. If only a single file has a prefix matching the target filename, that
+ * 	will be used instead.
+ * If this flag is disabled and an image file can't be found for a given metadata file, an error will be logged and the
+ * 	file will be skipped.
+ */
+const TRY_FUZZY_MATCHING_MISSING_FILENAMES = true;
+// const MAX_LENGTH_DIFF_FUZZY_MATCH = 20;
+
+/**
  * A set of filenames that should be excluded from the import process.
  * 
  * Current reasons for filenames to be on this list:
  * - The movie component of an Apple Live Photo that was found to already exist in Apple Photos.
  */
 let importExcludedFilenameSet = {};
+
+const extensionRegex = /\.([\w\d]{3,4})$/i;
+const parenthesisRegex = /\(\d+\)\./i;
+const parenthesisAndExtensionRegex = /(\(\d+\))?\s*\.([\w\d]{3,4})$/i;
 
 // ENTRY POINT
 function run(...argv) {
@@ -119,7 +136,7 @@ function runForAllAlbums(topLevelPath, workingPath) {
 	//	We need to do a first pass and get a set of all unique album names across all takeout directories first
 	//	so we can match and import based on the aggregate of all metadata for a given album.
 	for (const takeoutDirectoryName of takeoutDirectoryNames) {
-		const albumNames = appSys.folders.byName(`${topLevelPath}/${takeoutDirectoryName}/Google Photos`).folders.name();
+		const albumNames = appSys.folders.byName(`${topLevelPath}${takeoutDirectoryName}/Google Photos`).folders.name();
 		for (const albumName of albumNames) {
 			if (!takeoutDirectoriesByGoogleAlbumNames.hasOwnProperty(albumName)) {
 				takeoutDirectoriesByGoogleAlbumNames[albumName] = [];
@@ -270,11 +287,54 @@ function matchForSingleAlbum(
 		// console.log(`Image ${albumFileName} metadata: ${rawImageMetadata}`);
 
 		const timestamp = imageMetadata.photoTakenTime.timestamp;
-		const filename = imageMetadata.title;
-		const filepath = imageFilePaths[filename];
+		const rawFilename = imageMetadata.title;
+		let filename = sanitizeFilename(rawFilename);
+		let filepath = imageFilePaths[filename];
 		if (!filepath) {
-			console.log(`Failed to find cross-chunk file path for filename ${filename} referenced in metadata file ${albumPath}/${albumFileName}`);
-			continue;
+			// Couldn't find the image file we're looking for
+
+			if (TRY_FUZZY_MATCHING_MISSING_FILENAMES) {
+				const metadataFilenameExtensionResults = filename.match(extensionRegex);
+				if (!metadataFilenameExtensionResults) {
+					const extensionMatch = tryPossibleImageExtensions(filename, imageFilePaths);
+					if (extensionMatch) {
+						console.log(`Successfully to found extension ${extensionMatch} for filename ${filename} referenced in metadata file ${albumPath}/${albumFileName}`);
+						filename = extensionMatch;
+						filepath = imageFilePaths[filename];
+					} else {
+						console.log(`Failed to find extension for filename ${filename} referenced in metadata file ${albumPath}/${albumFileName}`);
+						continue;
+					}
+				}
+				const metadataFilenameExtension = metadataFilenameExtensionResults[1];
+				// Try some fuzzy matching shenanigans to find the file we're looking for
+				const prefixMatchingFilenames = Object
+					.keys(imageFilePaths)
+					// TODO: optimize this so we're not repeatedly stripping the extension for the same filename
+					.filter((existingFilename) => {
+						const existingFilenameSansExtension = existingFilename.replace(parenthesisAndExtensionRegex, '');
+						const metadataFilenameSansExtension = filename.replace(parenthesisAndExtensionRegex, '');
+						if (filename.startsWith(existingFilenameSansExtension)
+							&& existingFilename.endsWith(metadataFilenameExtension)) {
+								
+							return true;
+						} else {
+							return false;
+						}
+					});
+				if (prefixMatchingFilenames.length === 1) {
+					// console.log(`Fuzzy match succeeded for filename ${filename} referenced in metadata file ${albumPath}/${albumFileName}`);
+					filename = prefixMatchingFilenames[0];
+					filepath = imageFilePaths[filename];
+				} else {
+					console.log(`Fuzzy matching failed missing cross-chunk file for filename ${filename} referenced in metadata file ${albumPath}/${albumFileName}` +
+					` failed; found ${prefixMatchingFilenames.length} prefix matching filenames: ${JSON.stringify(prefixMatchingFilenames)}`);
+					continue;
+				}
+			} else {
+				console.log(`Failed to find cross-chunk file path for filename ${filename} referenced in metadata file ${albumPath}/${albumFileName}`);
+				continue;
+			}
 		}
 		
 		if (!doesFileExist(filepath)) {
@@ -327,6 +387,46 @@ function matchForSingleAlbum(
 }
 
 /**
+ * @param {string} filename A filename without extension to try image filename extensions for.
+ * @param {Object.<string, string>} imageFilePaths An object keyed by filenames that exist in the Google Photos folders for this album.
+ * @return {string|null} The first matching filename if found. Null if no matches were found.
+ */
+function tryPossibleImageExtensions(filename, imageFilePaths)
+{
+	const possibleImageExtensions = [
+		'jpg',
+		'jpeg',
+		'heic',
+		'png',
+	];
+
+	for (const extension of possibleImageExtensions) {
+		const lower = `${filename}.${extension}`;
+		if (imageFilePaths.hasOwnProperty(lower)) {
+			return lower;
+		}
+		const upper = `${filename}.${extension.toUpperCase()}`;
+		if (imageFilePaths.hasOwnProperty(upper)) {
+			return upper;
+		}
+	}
+	return null;
+}
+
+/**
+ * @param {string} filename 
+ * @returns {string} The filename sanitized to match observed behavior of downloading and extracting Google Photos files
+ * 	in Mac or Windows.
+ */
+function sanitizeFilename(filename)
+{
+	const sanitizeRegex = /[&'%\/]/g;
+	let newFilename = filename.replaceAll(sanitizeRegex, '_');
+
+	return newFilename;
+}
+
+/**
  * @param {string} path 
  * @returns True if a file exists at {@link path}, false if not.
  */
@@ -366,6 +466,15 @@ function updatePhotoFileTimestamp(
 }
 
 /**
+ * @param {string} filename 
+ * @returns {string} filename with the extension removed.
+ */
+function removeExtension(filename)
+{
+	return filename.replace(extensionRegex, '');
+}
+
+/**
  * Checks if this JSON file corresponds to an image file that also has an mp4 movie (an Apple Live Photo),
  * 	if so, then marks the movie to be ignored when importing by updating {@link importExcludedFilenameSet}.
  * 
@@ -376,8 +485,7 @@ function ignoreLivePhotos(
 	filename,
 	albumFileNameSet,
 ) {
-	const extensionRegex = /\.[\w\d]{3,4}$/i;
-	const filenameWithoutExtension = filename.replace(extensionRegex, '');
+	const filenameWithoutExtension = removeExtension(filename);
 	// console.log(`Raw filename ${filename}; without extension: ${filenameWithoutExtension}`);
 
 	const livePhotoFilenames = [
@@ -435,7 +543,7 @@ function importForSingleAlbum(
 			continue;
 		}
 		if (matchedPhotoFilenames.hasOwnProperty(filename)) {
-			console.log(`Google photo ${filename} was already matched with an Apple photo; not importing.`);
+			// console.log(`Google photo ${filename} was already matched with an Apple photo; not importing.`);
 			continue;
 		}
 		if (importExcludedFilenameSet.hasOwnProperty(filename)) {
